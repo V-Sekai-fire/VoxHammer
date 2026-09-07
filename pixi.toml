@@ -1,0 +1,75 @@
+# Environment for VoxHammer 3D latent mesh editing on the local 4090.
+#
+# Declared per CLAUDE.md: pixi, not uv. Upstream ships only requirements.txt,
+# which pins torch 2.4.0 on cu118 and assumes a Linux container
+# (FROM weftspun/trellis2-base, per RFD 0036). This manifest is the native
+# Windows/Linux route for the task #176 dress-on feasibility test.
+#
+# TWO DEVIATIONS FROM upstream requirements.txt, both deliberate:
+#
+# 1. flash-attn is NOT installed. TRELLIS selects its attention backend from
+#    the ATTN_BACKEND env var (xformers | flash_attn | sdpa | naive), so
+#    `sdpa` uses torch's built-in attention with no compiled extension.
+#    Windows flash-attn wheels do exist, but the published builds are ABI-tied
+#    to torch 2.6/2.7 + cu124/cu128 and there is none for the pinned
+#    torch 2.4.0 + cu118. flash-attn is a speed optimisation, not a
+#    correctness requirement -- revisit if this env moves to torch 2.7/cu128.
+#
+# 2. nvdiffrast is NOT installed. It appears only in trellis/renderers and
+#    trellis/utils/postprocessing_utils, not on the edit path
+#    (voxelize -> mark_region -> invert -> edit -> splice -> decode).
+#    Add it if mesh rendering or texturing is needed later; it compiles at
+#    import and needs MSVC on Windows.
+#
+# open3d and pysdf ARE required -- imported at module top level in
+# voxhammer/extract_feature.py and voxhammer/util_pysdf.py.
+
+[project]
+name = "voxhammer-upstream"
+version = "0.1.0"
+description = "VoxHammer 3D latent mesh editing (TRELLIS.2 backbone) for task #176 dress-on"
+channels = ["conda-forge"]
+platforms = ["win-64"]   # win-64 only: open3d 0.19 has cp312 wheels for win_amd64 but its
+                         # linux wheels need manylinux_2_31, which pixi's linux-64 target rejects.
+                         # Add linux-64 back when building in the WSL2 distro instead.
+
+[dependencies]
+# torch 2.4.0 has no cp313 wheels, so this env pins 3.12.
+python = "3.12.*"
+numpy = "<2"
+pillow = "*"
+tqdm = "*"
+opencv = "*"
+
+[pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/cu118"]
+
+[pypi-dependencies]
+torch = "==2.4.0"
+torchvision = "==0.19.0"
+xformers = "==0.0.27.post2"
+spconv-cu118 = "*"
+diffusers = "==0.34.0"
+transformers = "*"
+accelerate = "*"
+sentencepiece = "*"
+safetensors = "*"
+huggingface-hub = "*"
+# geometry: required by the edit path
+open3d = "*"
+pysdf = "*"
+trimesh = "*"
+plyfile = "*"
+mathutils = "*"
+igraph = "*"
+easydict = "*"
+rembg = "*"
+onnxruntime = "*"
+
+[activation.env]
+# No compiled attention extension in this environment.
+ATTN_BACKEND = "sdpa"
+SPCONV_ALGO = "native"
+
+[tasks]
+smoke = "python -c \"import torch, trellis; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())\""

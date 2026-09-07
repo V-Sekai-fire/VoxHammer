@@ -210,4 +210,4 @@ __marimo__/
 .vscode/
 .gradio/
 gradio_cache/
-outputs/
+outputs/.pixi/
