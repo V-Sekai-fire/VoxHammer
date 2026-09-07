@@ -211,3 +211,8 @@ __marimo__/
 .gradio/
 gradio_cache/
 outputs/.pixi/
+
+# Dress-on pipeline artefacts: renders, batches and staged datasets are regenerable and large.
+/work/
+/outputs/
+.pixi/
