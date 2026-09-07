@@ -38,7 +38,7 @@
 # open3d and pysdf ARE required -- imported at module top level in
 # voxhammer/extract_feature.py and voxhammer/util_pysdf.py.
 
-[project]
+[workspace]
 name = "voxhammer-upstream"
 version = "0.1.0"
 description = "VoxHammer 3D latent mesh editing (TRELLIS.2 backbone) for task #176 dress-on"
@@ -120,6 +120,7 @@ nvdiffrast-shim = { path = "vendor-shims/nvdiffrast-shim", editable = true }
 # blocklisted. Register a provider with rembg.set_mask_provider() before use.
 rembg-shim = { path = "vendor-shims/rembg-shim", editable = true }
 kaolin-shim = { path = "vendor-shims/kaolin-shim", editable = true }
+usd-core = "*"
 open3d = "==0.19.0"
 pysdf = "*"
 trimesh = "*"
@@ -156,3 +157,115 @@ CL = "/FIchrono /IC:/fabric-starforged/3-interactor/voxhammer-upstream/.pixi/env
 
 [tasks]
 smoke = "python -c \"import torch, trellis; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())\""
+
+# ---------------------------------------------------------------------------
+# `matting` environment: BiRefNet_HR-matting for foreground alpha generation.
+#
+# In its own environment because BiRefNet requires torch 2.5.1 while the edit
+# path pins torch 2.4.0+cu118, and rembg 2.0.75+ pins numpy>=2.3 which breaks
+# torch 2.4's C API (silent loss of tensor<->ndarray conversion).
+#
+# Licence: MIT (checked against workspace blocklist: clean of CC-BY-SA and
+# CC-BY-NC rows). Runs as a plain torch model, no ONNX in the environment.
+#
+# Use out-of-process:
+#   pixi run -e matting python tools/mask_offline.py <in.png> <out_alpha.png>
+# then feed the alpha PNG into the edit env's rembg-shim provider, or the
+# provider reads it directly.
+
+[feature.matting.dependencies]
+python = "3.11.*"
+
+[feature.matting.pypi-dependencies]
+# BiRefNet requirements.txt pins; keep them together on pypi.
+# torch/torchvision take the cu124 index PER-PACKAGE, not as a feature-wide
+# extra-index-url, to avoid triggering pixi's dependency-confusion guard.
+# A blanket extra-index-url resolves pyarrow (and every other package)
+# against both indexes, which pixi refuses without --index-strategy
+# unsafe-best-match. Per-package indexes keep everything else PyPI-only.
+numpy = "<2"
+torch = { version = "==2.5.1", index = "https://download.pytorch.org/whl/cu124" }
+torchvision = { version = "*", index = "https://download.pytorch.org/whl/cu124" }
+timm = "*"
+kornia = "*"
+einops = "*"
+opencv-python = "*"
+scipy = "*"
+scikit-image = "*"
+transformers = "*"
+datasets = ">=3"
+# datasets>=3 drops the pa.PyExtensionType API; older combos error at import.
+pyarrow = ">=14"
+"huggingface-hub" = ">0.25"
+# iceoryx2 shared-memory bus (contract-bus, weft_harness): the matting env
+# serves BiRefNet as an interactor so its 1 GB weights load once rather than
+# per call. No pypi wheel for cp311 -- 0.9.3 publishes only cp38 and cp314
+# on Windows -- so pixi builds it from source; rustup default stable-msvc
+# provides cargo. Named in no-build-isolation below so pixi does not sandbox
+# the maturin build away from its Rust toolchain.
+iceoryx2 = "==0.9.3"
+accelerate = "*"
+safetensors = "*"
+
+# ---------------------------------------------------------------------------
+# `anny` environment: ANNY body export + appendix-E identity solve.
+# Own env per one-pixi-env-per-usage: ANNY runs on torch 2.11 while the edit
+# env is pinned to torch 2.4 for VoxHammer. torch takes the cu128 index
+# per-package (a feature-wide extra-index-url trips pixi's confusion guard).
+[feature.anny.dependencies]
+python = "3.11.*"
+
+[feature.anny.pypi-dependencies]
+# OpenUSD: mesh operators and canonical assets are USD (operator 2026-09-07).
+usd-core = "*"
+numpy = "*"
+torch = { version = ">=2.11", index = "https://download.pytorch.org/whl/cu128" }
+anny = { path = "../anny", editable = true }
+trimesh = "*"
+roma = "*"
+datasets = ">=3"
+pyarrow = ">=14"
+
+# ---------------------------------------------------------------------------
+# `render` environment: Mitsuba 3 Hammersley renders emitting VoxHammer's
+# Step-1 contract (NNN.png + transforms.json + mesh.ply) and the 64-view AOV
+# layout score_render_pair.py reads. Same mitsuba pin as the mujoco env.
+[feature.render.dependencies]
+python = "3.11.*"
+
+[feature.render.pypi-dependencies]
+# OpenUSD: mesh operators and canonical assets are USD (operator 2026-09-07).
+usd-core = "*"
+mitsuba = "==3.9.1"
+trimesh = "*"
+numpy = "*"
+pillow = "*"
+opencv-python = "*"
+
+# ---------------------------------------------------------------------------
+# `judge` environment: EditScore (Apache-2) on Qwen3-VL-8B, the recipe from
+# 6-datasource/anny-render-corpus/pixi.toml [feature.editscore]. Frozen-judge
+# doctrine: base, adapter, precision, num_pass and prompt are pinned per run and
+# recorded on every judge row.
+[feature.judge.dependencies]
+python = "3.11.*"
+
+[feature.judge.pypi-dependencies]
+torch = { version = ">=2.6", index = "https://download.pytorch.org/whl/cu128" }
+torchvision = { version = "*", index = "https://download.pytorch.org/whl/cu128" }
+editscore = "*"
+transformers = "*"
+accelerate = "*"
+peft = "*"
+bitsandbytes = "*"
+qwen-vl-utils = "*"
+json-repair = "*"
+pillow = ">=10.0"
+numpy = ">=2.0"
+
+[environments]
+default = { features = [] }
+matting = { features = ["matting"], no-default-feature = true }
+anny = { features = ["anny"], no-default-feature = true }
+render = { features = ["render"], no-default-feature = true }
+judge = { features = ["judge"], no-default-feature = true }
