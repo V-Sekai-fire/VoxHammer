@@ -4,7 +4,10 @@ import argparse
 from typing import Optional
 
 from voxhammer.edit_pipeline import run_edit
-from voxhammer.bpy_render import render_3d_model
+# Deferred: bpy_render needs bpy + mathutils, which live in standalone
+# Blender rather than this environment. Importing it at module level makes
+# Steps 2-4 unimportable even when Step 1 is skipped or run out-of-process.
+# Imported inside run_3d_rendering instead, at the only point it is used.
 from voxhammer.extract_feature import extract_features
 from voxhammer.delete_region_voxel import process_delete_ply
 from trellis.pipelines import TrellisTextTo3DPipeline, TrellisImageTo3DPipeline
@@ -51,6 +54,7 @@ def run_3d_rendering(input_model_path: str, render_dir: str, **render_kwargs) ->
     print(f"Output directory: {render_dir}")
     print(f"Rendering parameters: {default_params}")
 
+    from voxhammer.bpy_render import render_3d_model
     result = render_3d_model(file_path=input_model_path, output_dir=render_dir, **default_params)
     print(f"Rendering completed successfully!")
     print(f"Generated {result['num_views']} views")
