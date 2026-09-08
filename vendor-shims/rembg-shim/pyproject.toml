@@ -1,0 +1,13 @@
+[project]
+name = "rembg-shim"
+version = "0.0.1"
+description = "Foreground-alpha provider with rembg's API. NOT rembg."
+requires-python = ">=3.9"
+dependencies = ["pillow", "numpy"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["rembg"]

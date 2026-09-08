@@ -1,0 +1,271 @@
+# Environment for VoxHammer 3D latent mesh editing on the local 4090.
+#
+# Declared per CLAUDE.md: pixi, not uv. Upstream ships only requirements.txt,
+# which pins torch 2.4.0 on cu118 and assumes a Linux container
+# (FROM weftspun/trellis2-base, per RFD 0036). This manifest is the native
+# Windows/Linux route for the task #176 dress-on feasibility test.
+#
+# TWO DEVIATIONS FROM upstream requirements.txt, both deliberate:
+#
+# 1. flash-attn is NOT installed. TRELLIS selects its attention backend from
+#    the ATTN_BACKEND env var (xformers | flash_attn | sdpa | naive), so
+#    `sdpa` uses torch's built-in attention with no compiled extension.
+#    Windows flash-attn wheels do exist, but the published builds are ABI-tied
+#    to torch 2.6/2.7 + cu124/cu128 and there is none for the pinned
+#    torch 2.4.0 + cu118. flash-attn is a speed optimisation, not a
+#    correctness requirement -- revisit if this env moves to torch 2.7/cu128.
+#
+# 2. nvdiffrast IS installed. An earlier revision dropped it as "renderer
+#    only" -- true of what it does, false about whether it is reachable:
+#    trellis/utils/postprocessing_utils imports nvdiffrast.torch at module
+#    level and edit_pipeline imports that module, so it is required just to
+#    import the edit path. It is used in bake_texture (dr.texture, uv_dr),
+#    which to_glb calls to write the output. The REAL package cannot build
+#    here: its CUDA extension requires a toolkit matching torch's, and this
+#    env pins torch 2.4.0+cu118 while the system toolkit is 12.4, with no
+#    CUDA 11.8 nvcc available from conda-forge for win-64. So a shim provides
+#    the import and RAISES on any call -- a silent no-op would let a texture
+#    failure look like a successful untextured result.
+#
+# 3. bpy and mathutils ARE installed, and this is why Python is 3.11.
+#    bpy is not confined to Step 1's rendering: voxhammer/delete_region_voxel.py
+#    imports it at module level for Step 3 (voxel masking), so it sits on the
+#    edit path proper and cannot be run out-of-process under standalone
+#    Blender. mathutils has no Windows wheels and compiles Blender's blenlib
+#    against the conda-forge Eigen below -- INCLUDE must carry the eigen3 dir
+#    when pixi builds it, not just when tasks run.
+#
+# open3d and pysdf ARE required -- imported at module top level in
+# voxhammer/extract_feature.py and voxhammer/util_pysdf.py.
+
+[workspace]
+name = "voxhammer-upstream"
+version = "0.1.0"
+description = "VoxHammer 3D latent mesh editing (TRELLIS.2 backbone) for task #176 dress-on"
+channels = ["conda-forge"]
+platforms = ["win-64"]   # win-64 only: open3d 0.19 has cp312 wheels for win_amd64 but its
+                         # linux wheels need manylinux_2_31, which pixi's linux-64 target rejects.
+                         # Add linux-64 back when building in the WSL2 distro instead.
+
+[dependencies]
+# conda-forge supplies the interpreter and SYSTEM libraries only. Every Python
+# package comes from pypi below.
+#
+# Mixing the two for native packages is what broke this env earlier: moving
+# scipy/numba/onnxruntime to conda-forge one at a time, while torch stayed on
+# pypi, ended with torch_python.dll unable to load its dependencies. Keep the
+# whole Python-level stack on one side so everything is built against the
+# same torch and numpy.
+python = "3.11.*"
+eigen = "*"          # headers only; pysdf and blenlib compile against these
+
+[pypi-options]
+# nvdiffrast's setup.py imports torch to locate CUDA and pick compiler flags,
+# so it cannot build in an isolated env -- its own error says as much. Build
+# it against the installed interpreter instead.
+# (no-build-isolation no longer needed -- the real nvdiffrast is not built.)
+extra-index-urls = ["https://download.pytorch.org/whl/cu118"]
+
+[pypi-dependencies]
+# torch 2.4.0 is built against the numpy 1.x C API. With numpy 2.x installed
+# it still imports but logs "Failed to initialize NumPy: _ARRAY_API not found"
+# and silently loses tensor<->ndarray conversion.
+numpy = "<2"
+# moved here from the conda section: everything Python-level lives on pypi so
+# it is built against the same torch/numpy.
+opencv-python = "*"
+pillow = "*"
+tqdm = "*"
+torch = "==2.4.0"
+torchvision = "==0.19.0"
+xformers = "==0.0.27.post2"
+spconv-cu118 = "*"
+diffusers = "==0.34.0"
+# Pinned, not floating. Newer transformers require torch >= 2.5 and, rather
+# than failing, they DISABLE PyTorch and degrade to tokenizers-only --
+# "Models won't be available" as a warning, then an obscure error at model
+# load. Upstream leaves this unpinned, which is how it drifts. 4.49 is the
+# last line that supports the pinned torch 2.4.
+transformers = ">=4.44,<4.50"
+accelerate = "*"
+sentencepiece = "*"
+safetensors = "*"
+huggingface-hub = "*"
+# geometry: required by the edit path
+# utils3d is imported by voxhammer/edit_pipeline.py and is absent from
+# requirements.txt, but README.md line 42 pins it -- and NOT to the PyPI
+# package of the same name. This is EasternJournalist/utils3d (utils3d.torch,
+# utils3d.numpy, utils3d.io); PyPI's unrelated "utils3d" caps open3d below
+# 0.19, which has no cp312 Windows wheels, so taking it from PyPI makes the
+# environment unsolvable. Name collision, not a version conflict.
+# bpy bundles mathutils, bmesh and the rest of Blender's Python API -- there
+# is no separate mathutils to install. The standalone PyPI mathutils is a
+# different, source-only distribution: 5.1.0 targets Blender 5.x's Python 3.13
+# and fails on 3.11 with "PyLong_AsInt: identifier not found".
+bpy = "==4.2.0"
+utils3d = { git = "https://github.com/EasternJournalist/utils3d.git", rev = "9a4eb15e4021b67b12c460c7057d642626897ec8" }
+# NOT NVIDIA Kaolin. trellis/.../flexicubes.py imports exactly one symbol,
+# kaolin.utils.testing.check_tensor, and uses it purely as a shape assertion
+# (always throw=False, inside asserts). Real Kaolin ships wheels per
+# torch/CUDA pair and none exists for torch 2.4.0 + cu118. Replace this with
+# the real package if anything ever needs Kaolin's meshes, cameras, renderers
+# or metrics -- the shim provides none of that and will simply be missing.
+# Distribution is named kaolin-shim (honest); it provides the `kaolin` import
+# package. Import name and distribution name are independent.
+nvdiffrast-shim = { path = "vendor-shims/nvdiffrast-shim", editable = true }
+# Replaces rembg. Upstream uses it only for a foreground alpha; real rembg
+# drags in onnxruntime + numba, whose native stack conflicts with the pip-built
+# torch here. The workspace's approved segmenter (rf-detr segmentation head,
+# with CC BY 4.0 clothing data) supplies the alpha instead, and BRIA RMBG is
+# blocklisted. Register a provider with rembg.set_mask_provider() before use.
+rembg-shim = { path = "vendor-shims/rembg-shim", editable = true }
+kaolin-shim = { path = "vendor-shims/kaolin-shim", editable = true }
+usd-core = "*"
+open3d = "==0.19.0"
+pysdf = "*"
+trimesh = "*"
+# postprocessing_utils imports these at module level alongside nvdiffrast:
+xatlas = "*"
+pyvista = "*"
+pymeshfix = "*"
+plyfile = "*"
+igraph = "*"
+easydict = "*"
+
+[activation.env]
+# xformers, not sdpa. trellis/modules/attention accepts
+# {xformers, flash_attn, sdpa, naive}, but trellis/modules/sparse accepts only
+# {xformers, flash_attn} -- it SILENTLY IGNORES sdpa and falls back to its
+# flash_attn default, which is not installed here. xformers is installed
+# (0.0.27.post2+cu118) and valid for both, so one value covers both paths.
+# Verify with the "[SPARSE] Backend: ..., Attention: ..." line at import.
+ATTN_BACKEND = "xformers"
+SPCONV_ALGO = "native"
+# MSVC reads INCLUDE; conda-forge puts Eigen under Library/include/eigen3, and
+# pysdf's sources ask for "Eigen/Core", so the eigen3 dir itself must be on it.
+INCLUDE = "$CONDA_PREFIX/Library/include/eigen3;$CONDA_PREFIX/Library/include"
+# pysdf 0.1.9's src/util.cpp uses std::chrono::high_resolution_clock without
+# including <chrono>; it used to arrive transitively, and current MSVC no
+# longer provides it. MSVC reads extra flags from CL, so force-include the
+# header rather than patching a vendored sdist.
+# Include paths go in CL, not INCLUDE. pixi/uv's build subprocess sets its own
+# INCLUDE (Windows SDK, MSVC) and overwrites ours, but leaves CL alone -- which
+# is why /FIchrono reached pysdf while INCLUDE did not reach mathutils.
+# /FIchrono: pysdf's src/util.cpp uses std::chrono without including it.
+# /I...eigen3: mathutils compiles Blender's blenlib, which needs Eigen/Core.
+CL = "/FIchrono /IC:/fabric-starforged/3-interactor/voxhammer-upstream/.pixi/envs/default/Library/include/eigen3"
+
+[tasks]
+smoke = "python -c \"import torch, trellis; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())\""
+
+# ---------------------------------------------------------------------------
+# `matting` environment: BiRefNet_HR-matting for foreground alpha generation.
+#
+# In its own environment because BiRefNet requires torch 2.5.1 while the edit
+# path pins torch 2.4.0+cu118, and rembg 2.0.75+ pins numpy>=2.3 which breaks
+# torch 2.4's C API (silent loss of tensor<->ndarray conversion).
+#
+# Licence: MIT (checked against workspace blocklist: clean of CC-BY-SA and
+# CC-BY-NC rows). Runs as a plain torch model, no ONNX in the environment.
+#
+# Use out-of-process:
+#   pixi run -e matting python tools/mask_offline.py <in.png> <out_alpha.png>
+# then feed the alpha PNG into the edit env's rembg-shim provider, or the
+# provider reads it directly.
+
+[feature.matting.dependencies]
+python = "3.11.*"
+
+[feature.matting.pypi-dependencies]
+# BiRefNet requirements.txt pins; keep them together on pypi.
+# torch/torchvision take the cu124 index PER-PACKAGE, not as a feature-wide
+# extra-index-url, to avoid triggering pixi's dependency-confusion guard.
+# A blanket extra-index-url resolves pyarrow (and every other package)
+# against both indexes, which pixi refuses without --index-strategy
+# unsafe-best-match. Per-package indexes keep everything else PyPI-only.
+numpy = "<2"
+torch = { version = "==2.5.1", index = "https://download.pytorch.org/whl/cu124" }
+torchvision = { version = "*", index = "https://download.pytorch.org/whl/cu124" }
+timm = "*"
+kornia = "*"
+einops = "*"
+opencv-python = "*"
+scipy = "*"
+scikit-image = "*"
+transformers = "*"
+datasets = ">=3"
+# datasets>=3 drops the pa.PyExtensionType API; older combos error at import.
+pyarrow = ">=14"
+"huggingface-hub" = ">0.25"
+# iceoryx2 shared-memory bus (contract-bus, weft_harness): the matting env
+# serves BiRefNet as an interactor so its 1 GB weights load once rather than
+# per call. No pypi wheel for cp311 -- 0.9.3 publishes only cp38 and cp314
+# on Windows -- so pixi builds it from source; rustup default stable-msvc
+# provides cargo. Named in no-build-isolation below so pixi does not sandbox
+# the maturin build away from its Rust toolchain.
+iceoryx2 = "==0.9.3"
+accelerate = "*"
+safetensors = "*"
+
+# ---------------------------------------------------------------------------
+# `anny` environment: ANNY body export + appendix-E identity solve.
+# Own env per one-pixi-env-per-usage: ANNY runs on torch 2.11 while the edit
+# env is pinned to torch 2.4 for VoxHammer. torch takes the cu128 index
+# per-package (a feature-wide extra-index-url trips pixi's confusion guard).
+[feature.anny.dependencies]
+python = "3.11.*"
+
+[feature.anny.pypi-dependencies]
+# OpenUSD: mesh operators and canonical assets are USD (operator 2026-09-07).
+usd-core = "*"
+numpy = "*"
+torch = { version = ">=2.11", index = "https://download.pytorch.org/whl/cu128" }
+anny = { path = "../anny", editable = true }
+trimesh = "*"
+roma = "*"
+datasets = ">=3"
+pyarrow = ">=14"
+
+# ---------------------------------------------------------------------------
+# `render` environment: Mitsuba 3 Hammersley renders emitting VoxHammer's
+# Step-1 contract (NNN.png + transforms.json + mesh.ply) and the 64-view AOV
+# layout score_render_pair.py reads. Same mitsuba pin as the mujoco env.
+[feature.render.dependencies]
+python = "3.11.*"
+
+[feature.render.pypi-dependencies]
+# OpenUSD: mesh operators and canonical assets are USD (operator 2026-09-07).
+usd-core = "*"
+mitsuba = "==3.9.1"
+trimesh = "*"
+numpy = "*"
+pillow = "*"
+opencv-python = "*"
+
+# ---------------------------------------------------------------------------
+# `judge` environment: EditScore (Apache-2) on Qwen3-VL-8B, the recipe from
+# 6-datasource/anny-render-corpus/pixi.toml [feature.editscore]. Frozen-judge
+# doctrine: base, adapter, precision, num_pass and prompt are pinned per run and
+# recorded on every judge row.
+[feature.judge.dependencies]
+python = "3.11.*"
+
+[feature.judge.pypi-dependencies]
+torch = { version = ">=2.6", index = "https://download.pytorch.org/whl/cu128" }
+torchvision = { version = "*", index = "https://download.pytorch.org/whl/cu128" }
+editscore = "*"
+transformers = "*"
+accelerate = "*"
+peft = "*"
+bitsandbytes = "*"
+qwen-vl-utils = "*"
+json-repair = "*"
+pillow = ">=10.0"
+numpy = ">=2.0"
+
+[environments]
+default = { features = [] }
+matting = { features = ["matting"], no-default-feature = true }
+anny = { features = ["anny"], no-default-feature = true }
+render = { features = ["render"], no-default-feature = true }
+judge = { features = ["judge"], no-default-feature = true }
