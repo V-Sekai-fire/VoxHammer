@@ -24,6 +24,7 @@ target (rule 2: a gate that cannot fail is decoration).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -96,16 +97,53 @@ def assert_judge(judge: dict[str, dict]) -> str:
     return "passed"
 
 
-def stage_asset(src: Path, stage: Path, key_dir: str) -> str:
+# Payload lives in the parquet, not beside it (operator 2026-09-08): an asset next to
+# a parquet is one ignore rule away from being dropped, which is how the FBD corpora lost
+# their diagrams. Images take the viewer's {bytes, path} shape so a reader can look at
+# them; meshes and point clouds are bytes with the staged path kept alongside as provenance.
+IMAGE_COLS = ("garment_front", "garment_back", "garment_brand", "matted_front", "matted_back",
+              "2d_render_front", "2d_edit_front", "2d_mask_front",
+              "2d_render_back", "2d_edit_back", "2d_mask_back")
+BLOB_COLS = ("input_asset", "mask_front", "mask_back", "candidate_asset", "candidate_gaussian")
+
+
+def embed(rec: dict, stage: Path) -> dict:
+    """Replace staged references with their bytes; an absent asset is empty, never null."""
+    out: dict = {}
+    for k, v in rec.items():
+        if k in IMAGE_COLS:
+            out[k] = {"bytes": (stage / v).read_bytes() if v else b"", "path": v}
+        elif k in BLOB_COLS:
+            out[k] = (stage / v).read_bytes() if v else b""
+            out[f"{k}_path"] = v
+        else:
+            out[k] = v
+    return out
+
+
+def sha256_file(p: Path) -> str:
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def stage_asset(src: Path, stage: Path, key_dir: str, sub: str = "") -> str:
     # Canonical mesh assets are OpenUSD (CLAUDE.md archive rule; operator 2026-09-07).
     # usd_convert.py writes a .usda beside every .glb; stage that one when it exists.
     if src.suffix.lower() == ".glb" and src.with_suffix(".usda").is_file():
         src = src.with_suffix(".usda")
     if not src.is_file():
         die(f"missing asset {src}")
-    dst = stage / "assets" / key_dir / src.name
+    dst = stage / "assets" / key_dir / sub / src.name
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if not dst.exists():
+    if dst.exists():
+        # Two sources landing on one destination is what made three candidates share
+        # one mesh; refuse it rather than let the second copy be dropped in silence.
+        if sha256_file(dst) != sha256_file(src):
+            die(f"two different sources stage onto {dst.relative_to(stage).as_posix()}: {src}")
+    else:
         shutil.copy2(src, dst)
     rel = dst.relative_to(stage).as_posix()
     if ABSOLUTE_RE.search(rel):
@@ -113,12 +151,12 @@ def stage_asset(src: Path, stage: Path, key_dir: str) -> str:
     return rel
 
 
-def append(table: pa.Table, path: Path) -> None:
+def append(table: pa.Table, path: Path, level: int = 10) -> None:
     if path.exists():
         old = pq.read_table(path)
         table = pa.concat_tables([old, table.cast(old.schema)])
     path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, path, compression="zstd", compression_level=10)
+    pq.write_table(table, path, compression="zstd", compression_level=level, row_group_size=4)
 
 
 def main() -> int:
@@ -152,7 +190,7 @@ def main() -> int:
             if "brand" in comp["garment"]:
                 die(f"{r}/{side} conditioned on the brand close-up (pass-1 no-logos rule)")
 
-    S = lambda p: stage_asset(p, stage, key_dir)  # noqa: E731
+    S = lambda p, sub="": stage_asset(p, stage, key_dir, sub)  # noqa: E731
     g = t / "garment"
     root = {
         "key": key, "task_type": STUB[1], "dimension": STUB[2], "input_column": STUB[3],
@@ -188,8 +226,8 @@ def main() -> int:
         timing = load(cdir / "timing.json") if (cdir / "timing.json").exists() else {}
         rec = {
             "row_key": key, "candidate": r, "rank": rank,
-            "candidate_asset": S(cdir / "candidate.glb"),
-            "candidate_gaussian": S(cdir / "candidate_gaussian.ply") if (cdir / "candidate_gaussian.ply").exists() else S(cdir / "candidate.glb"),
+            "candidate_asset": S(cdir / "candidate.glb", r),
+            "candidate_gaussian": S(cdir / "candidate_gaussian.ply", r) if (cdir / "candidate_gaussian.ply").exists() else S(cdir / "candidate.glb", r),
             "candidate_provenance": ("constructed-decode:voxhammer-source-recon" if r == "rank5"
                                      else f"generated:voxhammer:trellis-image-large:seed{timing.get('seed', -1)}"),
             "garment_id_used": int(load(cdir / "garment_used.json")["garment_id"]) if (cdir / "garment_used.json").exists() else -1,
@@ -206,7 +244,7 @@ def main() -> int:
             idir = cdir / f"images_{side}"
             for name in ("2d_render", "2d_edit", "2d_mask"):
                 p = idir / f"{name}.png"
-                rec[f"{name}_{side}"] = S(p) if p.exists() else ""
+                rec[f"{name}_{side}"] = S(p, f"{r}/{side}") if p.exists() else ""
         cands.append(rec)
         for v in scores[r]["views"]:
             score_rows.append({"row_key": key, "candidate": r, **{k: (float(x) if isinstance(x, float) else int(x)) for k, x in v.items()}})
@@ -220,8 +258,10 @@ def main() -> int:
                                "refused": bool(j["refused"])})
 
     data = stage / "data"
-    append(pa.Table.from_pylist([root]), data / "dress_on.parquet")
-    append(pa.Table.from_pylist(cands), data / "dress_on_candidates.parquet")
+    # Payload tables carry already-compressed images, so level 3 buys the same size for
+    # a fraction of the time; the two small tables keep 10.
+    append(pa.Table.from_pylist([embed(root, stage)]), data / "dress_on.parquet", level=3)
+    append(pa.Table.from_pylist([embed(c, stage) for c in cands]), data / "dress_on_candidates.parquet", level=3)
     append(pa.Table.from_pylist(score_rows), data / "dress_on_scores.parquet")
     if judge_rows:
         append(pa.Table.from_pylist(judge_rows), data / "dress_on_judge.parquet")
