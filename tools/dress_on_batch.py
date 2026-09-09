@@ -93,9 +93,11 @@ def edit(target: Path, cand: str, body_glb: Path, render_dir: Path, gid: int, se
             "--garment", GARMENT_INPUTS / f"garment-{gid}-{side}.jpg",
             "--alpha", GARMENT_MATTED / f"garment-{gid}-{side}.alpha.png")
         out_dir = cdir / f"pass{k + 1}"
+        mpu = 1.0 / float(json.loads((target / "phenotype.json").read_text()).get("unit_scale", 1.0))
         args = [REPO / "run_edit_test.py", "--input_model", current, "--mask_glb", target / f"mask_{side}.usda",
                 "--render_dir", current_render, "--image_dir", images, "--output_dir", out_dir,
-                "--output_name", f"dressed_{side}.glb", "--seed", str(seed + k)]
+                "--output_name", f"dressed_{side}.glb", "--seed", str(seed + k),
+                "--meters-per-unit", repr(mpu)]
         if recon and k == 0:
             args.append("--export-source-recon")
         run("default", *args, extra_env=EDIT_ENV, log=out_dir / "run.log",

@@ -170,6 +170,38 @@ def _sensor(mi, resolution: int):
     }
 
 
+
+def select_variant(mi, cpu_reason: str) -> str:
+    """The GPU variant, or a refusal naming what it tried.
+
+    The CPU variants are blocklisted. RFD 1137 measured 96 frames at 0.34 s
+    each on the card against 78 s each through llvm, a factor of 230, and the
+    fallback that reached them was silent: a sweep would not fail, it would run
+    for days and nothing in the output would say which renderer made it. The
+    blocklist exempts a card-less desk taken deliberately, which is what a
+    stated reason and a recorded variant make auditable.
+    """
+    tried = []
+    for candidate in ("cuda_ad_rgb", "llvm_ad_rgb", "scalar_rgb"):
+        if candidate != "cuda_ad_rgb" and not cpu_reason:
+            break
+        try:
+            mi.set_variant(candidate)
+            if candidate != "cuda_ad_rgb":
+                print(f"[render] BLOCKLISTED CPU PATH taken on purpose: {cpu_reason}")
+            return candidate
+        except Exception as e:
+            tried.append(f"{candidate}: {type(e).__name__}: {str(e)[:120]}")
+    if cpu_reason:
+        raise SystemExit("FAIL: no mitsuba variant is available:\n  " + "\n  ".join(tried))
+    raise SystemExit(
+        "FAIL: cuda_ad_rgb is unavailable, and the CPU variants are blocklisted:\n"
+        "  " + "\n  ".join(tried) + "\n"
+        "  Measured 78 s a frame against 0.34 s on the card, a factor of 230.\n"
+        "  Free the card, or state a reason with --cpu-on-purpose to take the\n"
+        "  exemption the blocklist allows for a desk with no card."
+    )
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mesh", type=Path, required=True)
@@ -179,19 +211,17 @@ def main() -> int:
     ap.add_argument("--resolution", type=int, default=512)
     ap.add_argument("--aov", action="store_true", help="emit the score_render_pair.py layout")
     ap.add_argument("--spp", type=int, default=64)
+    ap.add_argument("--cpu-on-purpose", metavar="REASON", default="",
+                    help="take the blocklisted CPU path for a stated reason, recorded in the "
+                         "manifest; 230x slower and refused without a reason")
     ap.add_argument("--keep-frame", action="store_true",
                     help="do not re-normalize (pass >= 2: input is already in the canonical frame)")
     a = ap.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
 
     import mitsuba as mi
-    for variant in ("cuda_ad_rgb", "llvm_ad_rgb", "scalar_rgb"):
-        try:
-            mi.set_variant(variant)
-            break
-        except Exception:
-            continue
-    print(f"[render] mitsuba {mi.__version__} variant={mi.variant()}")
+    variant = select_variant(mi, a.cpu_on_purpose)
+    print(f"[render] mitsuba {mi.__version__} variant={variant}")
 
     v, f, rgb = load_mesh_zup(a.mesh)
     if a.aov:
@@ -260,7 +290,10 @@ def main() -> int:
     if not a.aov:
         (a.out / "transforms.json").write_text(json.dumps({
             "aabb": [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]], "scale": 1.0, "offset": [0.0, 0.0, 0.0],
-            "hammersley_seed": a.seed, "hammersley_offset": list(offset), "frames": frames}, indent=2))
+            "hammersley_seed": a.seed, "hammersley_offset": list(offset),
+            "renderer": f"mitsuba {mi.__version__}", "variant": variant, "spp": a.spp,
+            "cpu_on_purpose": a.cpu_on_purpose,
+            "frames": frames}, indent=2))
     print(f"[render] wrote {a.views} views to {a.out}")
     return 0
 
