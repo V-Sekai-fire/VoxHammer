@@ -81,6 +81,10 @@ def main() -> int:
             continue
         out = glb.with_suffix(".usda")
         if out.exists():  # anny_body.py and the driver already write USD directly
+            have = UsdGeom.GetStageMetersPerUnit(Usd.Stage.Open(str(out)))
+            if abs(have - mpu) > 1e-9:
+                raise SystemExit(f"REFUSED: {out.relative_to(a.target)} declares metersPerUnit "
+                                 f"{have!r}, the target is {mpu!r}; a skipped file is not a checked one")
             done[str(glb.relative_to(a.target))] = "present"
             continue
         done[str(glb.relative_to(a.target))] = mesh_to_usda(glb, out, mpu)

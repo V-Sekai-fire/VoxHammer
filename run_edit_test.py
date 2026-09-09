@@ -314,6 +314,10 @@ if __name__ == "__main__":
     ap.add_argument("--target_prompt", default="")
     ap.add_argument("--seed", type=int, default=0, help="seeds numpy (Hammersley offset) and torch (samplers)")
     ap.add_argument("--output_name", default="output.glb")
+    # The mesh is unit-height, so the stage's metersPerUnit carries the subject's stature.
+    # Defaulting it silently is what shipped rank1 and rank3 at 1 m whatever the body.
+    ap.add_argument("--meters-per-unit", dest="meters_per_unit", type=float, required=True,
+                    help="one unit-cube unit in metres (phenotype unit_scale reciprocal)")
     ap.add_argument("--export-source-recon", action="store_true",
                     help="also export the unedited source decode (<output>_source_recon.glb): the floor for controls")
     ap.add_argument("--delete-only", action="store_true",
@@ -374,6 +378,7 @@ if __name__ == "__main__":
     if _EXPORT_STATE.get("last_mesh"):
         vy, f, rgb01 = _EXPORT_STATE["last_mesh"]
         usd_io.write_mesh(os.path.splitext(output_path)[0] + ".usda", vy, f, rgb01, up="Y",
+                          meters_per_unit=args.meters_per_unit,
                           frame="unit-cube-yup-forward+z", source=f"voxhammer:{name}:seed{args.seed}")
     with open(os.path.splitext(output_path)[0] + ".timing.json", "w") as fh:
         json.dump(timing, fh, indent=2)
